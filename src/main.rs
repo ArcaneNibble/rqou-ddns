@@ -19,7 +19,10 @@ use pnetlink::packet::netlink::NetlinkReader;
 use pnetlink::packet::route::addr::IFA_ADDRESS;
 use pnetlink::packet::route::addr::RTM_NEWADDR;
 use pnetlink::packet::route::addr::Addr;
+use pnetlink::packet::route::addr::Scope;
+use pnetlink::packet::route::addr::Addresses;
 use pnetlink::packet::route::addr::IpAddr;
+use pnetlink::packet::route::addr::IfAddrFlags;
 use pnetlink::packet::route::IfAddrPacket;
 use pnetlink::packet::route::RtAttrPacket;
 use pnetlink::packet::route::link::Links;
@@ -72,7 +75,6 @@ fn update_ipv4(stdin: &mut ChildStdin, domain: &str, ipaddr: &Ipv4Addr) {
     let delete_str = format!("update delete {} A\n", domain);
     stdin.write_all(delete_str.as_bytes());
     let update_str = format!("update add {} 60 A {}\n", domain, ipaddr);
-    println!("{}", update_str);
     stdin.write_all(update_str.as_bytes());
     stdin.write_all("send\n".as_bytes());
 }
@@ -81,7 +83,6 @@ fn update_ipv6(stdin: &mut ChildStdin, domain: &str, ipaddr: &Ipv6Addr) {
     let delete_str = format!("update delete {} AAAA\n", domain);
     stdin.write_all(delete_str.as_bytes());
     let update_str = format!("update add {} 60 AAAA {}\n", domain, ipaddr);
-    println!("{}", update_str);
     stdin.write_all(update_str.as_bytes());
     stdin.write_all("send\n".as_bytes());
 }
@@ -127,14 +128,38 @@ fn main() {
     let dev_name = std::env::args_os().nth(1).expect("Need a device name!");
     println!("Watching for IP changes on {}...", dev_name.to_string_lossy());
 
-    // This part gets the unique index of the interface
+    // This part gets the unique index of the interface and does initial update
     let iface_idx;
+    let mut initial_v4 = None;
+    let mut initial_v6 = None;
     {
         let mut nl_query_conn = NetlinkConnection::new();
         // FIXME: Non-UTF-8?
         let link = nl_query_conn.get_link_by_name(&dev_name.to_string_lossy())
             .expect("Device name not found!").expect("Device name not found!");
         iface_idx = link.get_index();
+
+        for addr in nl_query_conn.iter_addrs(None).unwrap() {
+            if addr.get_link_index() == iface_idx {
+                // Scope global and not deprectated
+                match addr.get_scope() {
+                    Scope::Global => {
+                        if (addr.get_flags().bits() & 0x20) == 0 {
+                            let ip = addr.get_ip().unwrap();
+                            match ip {
+                                IpAddr::V4(v4addr) => {
+                                    initial_v4 = Some(v4addr);
+                                },
+                                IpAddr::V6(v6addr) => {
+                                    initial_v6 = Some(v6addr);
+                                }
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
     }
 
     // Spawn nsupdate
@@ -147,6 +172,31 @@ fn main() {
         RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR)
         .expect("Opening netlink socket failed!");
     let mut nl_reader = NetlinkReader::new(&mut nl_sock);
+
+    // Do initial update
+    match initial_v4 {
+        Some(initial_v4) => {
+            update_ipv4(&mut nsupdate_in, main_dns_name, &initial_v4);
+        },
+        _ => {}
+    }
+
+    match initial_v6 {
+        Some(initial_v6) => {
+            update_ipv6(&mut nsupdate_in, main_dns_name, &initial_v6);
+
+            for ((p4, p5, p6, p7), domain) in other_dns_names.to_vec() {
+                let this_addr = Ipv6Addr::new(
+                    initial_v6.segments()[0],
+                    initial_v6.segments()[1],
+                    initial_v6.segments()[2],
+                    initial_v6.segments()[3],
+                    p4, p5, p6, p7);
+                update_ipv6(&mut nsupdate_in, &domain, &this_addr);
+            }
+        },
+        _ => {}
+    }
 
     while let Ok(Some(pkt)) = nl_reader.read_netlink() {
         // Only process new addresses (don't bother with deleting)
