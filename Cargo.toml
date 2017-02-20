@@ -7,3 +7,4 @@ authors = [ "Robert Ou <rqou@robertou.com>" ]
 
 [dependencies]
 pnetlink = "0.0.2"
+pnet = "0.16"
