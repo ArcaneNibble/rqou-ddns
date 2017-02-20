@@ -72,6 +72,7 @@ fn update_ipv4(stdin: &mut ChildStdin, domain: &str, ipaddr: &Ipv4Addr) {
     let delete_str = format!("update delete {} A\n", domain);
     stdin.write_all(delete_str.as_bytes());
     let update_str = format!("update add {} 60 A {}\n", domain, ipaddr);
+    println!("{}", update_str);
     stdin.write_all(update_str.as_bytes());
     stdin.write_all("send\n".as_bytes());
 }
@@ -80,6 +81,7 @@ fn update_ipv6(stdin: &mut ChildStdin, domain: &str, ipaddr: &Ipv6Addr) {
     let delete_str = format!("update delete {} AAAA\n", domain);
     stdin.write_all(delete_str.as_bytes());
     let update_str = format!("update add {} 60 AAAA {}\n", domain, ipaddr);
+    println!("{}", update_str);
     stdin.write_all(update_str.as_bytes());
     stdin.write_all("send\n".as_bytes());
 }
@@ -118,7 +120,7 @@ fn main() {
     }).collect();
 
     println!("Main domain name: {}", main_dns_name);
-    for (_, other_name) in other_dns_names {
+    for (_, other_name) in other_dns_names.to_vec() {
         println!("Extra domain name: {}", other_name);
     }
 
@@ -165,6 +167,18 @@ fn main() {
                                 IpAddr::V6(v6addr) => {
                                     update_ipv6(&mut nsupdate_in,
                                         main_dns_name, &v6addr);
+
+                                    for ((p4, p5, p6, p7), domain) in
+                                        other_dns_names.to_vec() {
+                                        let this_addr = Ipv6Addr::new(
+                                            v6addr.segments()[0],
+                                            v6addr.segments()[1],
+                                            v6addr.segments()[2],
+                                            v6addr.segments()[3],
+                                            p4, p5, p6, p7);
+                                        update_ipv6(&mut nsupdate_in, &domain,
+                                            &this_addr);
+                                    }
                                 }
                             }
                         }
