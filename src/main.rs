@@ -85,9 +85,10 @@ fn update_ipv6(stdin: &mut ChildStdin, domain: &str, ipaddr: &Ipv6Addr) {
     stdin.write_all("send\n".as_bytes()).unwrap();
 }
 
+// Usage: rqou-ddns up-iface down-iface conf-file
 fn main() {
     // Load config file
-    let conf_file_name = std::env::args_os().nth(2)
+    let conf_file_name = std::env::args_os().nth(3)
         .expect("Need a config file!");
     let conf_file_name = Path::new(&conf_file_name);
     let conf_file = File::open(&conf_file_name)
@@ -122,33 +123,45 @@ fn main() {
         println!("Extra domain name: {}", other_name);
     }
 
-    let dev_name = std::env::args_os().nth(1).expect("Need a device name!");
-    println!("Watching for IP changes on {}...", dev_name.to_string_lossy());
+    let up_dev_name = std::env::args_os().nth(1)
+        .expect("Need a device name!");
+    let down_dev_name = std::env::args_os().nth(2)
+        .expect("Need a device name!");
+    println!("Watching for IP changes on {}/{}...",
+        up_dev_name.to_string_lossy(), down_dev_name.to_string_lossy());
 
     // This part gets the unique index of the interface and does initial update
-    let iface_idx;
+    let up_iface_idx;
+    let down_iface_idx;
     let mut initial_v4 = None;
     let mut initial_v6 = None;
     {
         let mut nl_query_conn = NetlinkConnection::new();
         // FIXME: Non-UTF-8?
-        let link = nl_query_conn.get_link_by_name(&dev_name.to_string_lossy())
+        let link = nl_query_conn.get_link_by_name(
+            &up_dev_name.to_string_lossy())
             .expect("Device name not found!").expect("Device name not found!");
-        iface_idx = link.get_index();
+        up_iface_idx = link.get_index();
+        let link = nl_query_conn.get_link_by_name(
+            &down_dev_name.to_string_lossy())
+            .expect("Device name not found!").expect("Device name not found!");
+        down_iface_idx = link.get_index();
 
         for addr in nl_query_conn.iter_addrs(None).unwrap() {
-            if addr.get_link_index() == iface_idx {
-                // Scope global and not deprecated
-                if let Scope::Global = addr.get_scope() {
-                    if (addr.get_flags() & DEPRECATED).bits() == 0 {
+            // Scope global and not deprecated
+            if let Scope::Global = addr.get_scope() {
+                if (addr.get_flags() & DEPRECATED).bits() == 0 {
+                    // Use IPv4 from up iface
+                    if addr.get_link_index() == up_iface_idx {
                         let ip = addr.get_ip().unwrap();
-                        match ip {
-                            IpAddr::V4(v4addr) => {
-                                initial_v4 = Some(v4addr);
-                            },
-                            IpAddr::V6(v6addr) => {
-                                initial_v6 = Some(v6addr);
-                            }
+                        if let IpAddr::V4(v4addr) = ip {
+                            initial_v4 = Some(v4addr);
+                        }
+                    // Use IPv6 from down iface
+                    } else if addr.get_link_index() == down_iface_idx {
+                        let ip = addr.get_ip().unwrap();
+                        if let IpAddr::V6(v6addr) = ip {
+                            initial_v6 = Some(v6addr);
                         }
                     }
                 }
@@ -190,7 +203,8 @@ fn main() {
         // Only process new addresses (don't bother with deleting)
         if pkt.get_kind() == RTM_NEWADDR {
             if let Some(addrpkt) = IfAddrPacket::new(&pkt.payload()) {
-                if addrpkt.get_index() == iface_idx {
+                if (addrpkt.get_index() == up_iface_idx) ||
+                    (addrpkt.get_index() == down_iface_idx) {
                     let iter = my_RtAttrIterator::new(addrpkt.payload());
                     for rta in iter {
                         if rta.get_rta_type() == IFA_ADDRESS {
@@ -199,23 +213,29 @@ fn main() {
                             println!("ip {:?}", addr);
                             match addr {
                                 IpAddr::V4(v4addr) => {
-                                    update_ipv4(&mut nsupdate_in,
-                                        main_dns_name, &v4addr);
+                                    // IPv4 from up interface
+                                    if addrpkt.get_index() == up_iface_idx {
+                                        update_ipv4(&mut nsupdate_in,
+                                            main_dns_name, &v4addr);
+                                    }
                                 }
                                 IpAddr::V6(v6addr) => {
-                                    update_ipv6(&mut nsupdate_in,
-                                        main_dns_name, &v6addr);
+                                    // IPv6 from down interface
+                                    if addrpkt.get_index() == down_iface_idx {
+                                        update_ipv6(&mut nsupdate_in,
+                                            main_dns_name, &v6addr);
 
-                                    for &((p4, p5, p6, p7), ref domain) in
-                                        &other_dns_names {
-                                        let this_addr = Ipv6Addr::new(
-                                            v6addr.segments()[0],
-                                            v6addr.segments()[1],
-                                            v6addr.segments()[2],
-                                            v6addr.segments()[3],
-                                            p4, p5, p6, p7);
-                                        update_ipv6(&mut nsupdate_in, domain,
-                                            &this_addr);
+                                        for &((p4, p5, p6, p7), ref domain) in
+                                            &other_dns_names {
+                                            let this_addr = Ipv6Addr::new(
+                                                v6addr.segments()[0],
+                                                v6addr.segments()[1],
+                                                v6addr.segments()[2],
+                                                v6addr.segments()[3],
+                                                p4, p5, p6, p7);
+                                            update_ipv6(&mut nsupdate_in,
+                                                domain, &this_addr);
+                                        }
                                     }
                                 }
                             }
